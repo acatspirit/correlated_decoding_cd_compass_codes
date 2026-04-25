@@ -1,23 +1,11 @@
 from matplotlib.lines import Line2D
 import numpy as np
-from pymatching import Matching
 import matplotlib.pyplot as plt
 from matplotlib import colormaps
-from matplotlib.colors import Normalize
 from matplotlib.ticker import ScalarFormatter
-from scipy import sparse, linalg
-import compass_codes as cc
-import csv
 import pandas as pd
 import os
-import collections
-from datetime import datetime
-import sys
-import glob
 from scipy.optimize import curve_fit
-import circuit_gen as cc_circuit
-import itertools
-import stim
 import io
 import requests
 
