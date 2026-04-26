@@ -4,6 +4,7 @@ import compass_codes as cc
 import collections
 import circuit_gen as cc_circuit
 import stim
+import scipy.sparse as sparse
 
 
 ##############################################
@@ -13,15 +14,25 @@ import stim
 ##############################################
 
 class CorrelatedDecoder:
+    """
+    Implements decoding algorithms for Clifford-deformed elongated compass codes.
+    
+    This class supports standard MWPM, correlated MWPM with Pymatching, correlated decoding (X then Z or vice versa), 
+    and bias-aware hyperedge decoding for circuit-level noise models.
+
+    Author: Arianna Meinking
+    Date: April 25, 2026
+    """
+
     def __init__(self, eta, d, l, corr_type, mem_type="X"):
         self.eta = eta # the noise bias
         self.d = d # the distance of the compass code
         self.l = l # the elongation parameter
         self.corr_type = corr_type # the type of correlation for decoder (directional)
-        self.mem_type = mem_type
+        self.mem_type = mem_type # logical to extract during memory
         self.edge_type_d = {} # dictionary of the edge types for each detector. Empty until populated by running method to populate. Type 0(1) use pauli X(Z) measurements
 
-        self.code = cc.CompassCode(d=self.d, l=self.l)
+        self.code = cc.CompassCode(d=self.d, l=self.l) 
         self.H_x, self.H_z = self.code.H['X'], self.code.H['Z'] # parity check matrices from compass code class
         self.log_x, self.log_z = self.code.logicals['X'], self.code.logicals['Z'] # logical operators from compass code class
 
@@ -33,6 +44,10 @@ class CorrelatedDecoder:
         return new_prob  
 
     def get_dB_scaling(self, matching):
+        """ Returns the decibels per weight scaling factor for the complementary gap calculation. 
+            This is based on the edge weights and probabilities in the matching graph, 
+            and assumes that all edges are normalized by the same factor."""
+
         edge = next(iter(matching.to_networkx().edges.values()))
         edge_w = edge['weight']
         edge_p = edge['error_probability']
@@ -41,19 +56,18 @@ class CorrelatedDecoder:
 
     def depolarizing_err(self, p):
         """Generates the error vector for one shot according to depolarizing noise model.
-        Args:
-        - p: Error probability.
-        - num_qubits: Number of qubits.
-        - eta: depolarizing channel bias. Recover unbiased depolarizing noise eta = 0.5. 
+        :param p: Error probability.
+        :param num_qubits: Number of qubits.
+        :param eta: depolarizing channel bias. Recover unbiased depolarizing noise eta = 0.5. 
                     Px, py, pz are determined according to 2D Compass Codes paper (2019) defn of eta
         
-        Returns:
-        - A list containing error vectors for no error, X, Z, and Y errors.
+        :return: A list containing error vectors for no error, X, Z, and Y errors.
         """
         H = self.H_x
         eta = self.eta
 
         num_qubits = H.shape[1]
+
         # Error vectors for I, X, Z, and Y errors
         errors = np.zeros((2, num_qubits), dtype=int)
 
@@ -63,63 +77,31 @@ class CorrelatedDecoder:
         probs = [1 - p, px, pz, px]  # Probabilities for I, X, Z, and Y errors
 
         # Randomly choose error types for all qubits
-        # np.random.seed(10)
         choices = np.random.choice(4, size=num_qubits, p=probs)
         # Assign errors based on the chosen types
         errors[0] = np.where((choices == 1) | (choices == 3), 1, 0)  # X or Y error
         errors[1] = np.where((choices == 2) | (choices == 3), 1, 0)  # Z or Y error
         return errors
-    
-    def test_error(self, error_x, error_z):
 
-        M_x = Matching.from_check_matrix(self.H_x)
-        M_z = Matching.from_check_matrix(self.H_z)
-        
-        syndrome_x, syndrome_z = error_x @ self.H_z.T % 2, error_z @ self.H_x.T % 2
-        print(f"syndrome for X errors {syndrome_x}")
-        print(f"syndrome for Z errors {syndrome_z}")
-
-        correction_x = M_z.decode(syndrome_x)
-        correction_z = M_x.decode(syndrome_z)
-
-        print(f"correction for X errors {correction_x}")
-        print(f"correction for Z errors {correction_z}")
 
         
     
+    #########################################################################
     #
+    # Code-capacity decoding functions
     #
-    # Decoder functions
-    #
-    #
-
-    def decoding_failures(self,p, shots, error_type):
-        """ finds the number of logical errors after decoding
-            p - probability of error
-            shots - number of shots
-            error_type - the type of error that you hope to decode, X = 0, Z = 1
-        """
-        if error_type == "X": 
-            H = self.H_x
-            L = self.log_x
-        elif error_type == "Z":
-            H = self.H_z
-            L = self.log_z
-        M = Matching.from_check_matrix(H)
-        # get the depolarizing error vector 
-        err_vec = [self.depolarizing_err(p)[error_type] for _ in range(shots)]
-        # generate the syndrome for each shot
-        syndrome_shots = err_vec@H.T%2
-        # the correction to the errors
-        correction = M.decode_batch(syndrome_shots)
-        num_errors = np.sum((correction+err_vec)@L%2)
-        return num_errors
+    #########################################################################
 
     def decoding_failures_correlated(self, p, shots):
-        """ Finds the number of logical errors after decoding.
-            p - probability of error
-            shots - number of shots
-            corr_type - CORR_XZ or CORR_ZX. Whether to return X then Z or Z then X correlated errors.
+        """ Correlated X/Z decoding with tailoring for noise bias. 
+            :param p: probability of error
+            :param shots: number of shots
+            :param corr_type: CORR_XZ or CORR_ZX. Whether to return X then Z or Z then X correlated errors.
+
+            :return num_errors_x: the number of X logical errors after decoding
+            :return num_errors_z: the number of Z logical errors after decoding
+            :return num_errors_corr: the number of logical errors after correlated decoding X and Z
+            :return num_errors_tot: the total number of logical errors after decoding, uncorrelated
         """
         M_z = Matching.from_check_matrix(self.H_z)
         M_x = Matching.from_check_matrix(self.H_x)
@@ -181,8 +163,8 @@ class CorrelatedDecoder:
 
     def decoding_failures_uncorr(self,p, shots):
         """ Finds the number of logical errors after decoding.
-            p - probability of error
-            shots - number of shots
+            :param p: probability of error
+            :param shots: number of shots
         """
         # create a matching graph
         M_z = Matching.from_check_matrix(self.H_z)
@@ -205,22 +187,16 @@ class CorrelatedDecoder:
         
         return num_errors_x, num_errors_z
     
-    ########################################################################
-    #
-    # Circuit level correlated decoding functions
-    #
-    ########################################################################
 
-
-
+    #########################################################################
     #
-    # Graph labelling / edge tracking
+    # Graph Construction
     #
+    #########################################################################
 
     def probability_edge_mapping(self, edge_dict):
         """ Maps the probabilities to the corresponding edge weight in the matching graph. Takes into
-            account the 'type' of qubit, whether it is clifford deformed or not. CURRENTLY DOES NOT TAKE INTO 
-            ACCOUNT THE TYPE OF QUBIT - NOT SURE WHAT THIS MEANS / HOW TO ACCOUNT CD
+            account the 'type' of qubit, whether it is clifford deformed or not. 
         """
         weights_dict = {}
 
@@ -386,7 +362,6 @@ class CorrelatedDecoder:
 
         return xlb_nodes,xrb_nodes,ztb_nodes,zbb_nodes
 
-
     def get_edge_type_d(self, dem, mem_type, CD_type) -> dict:
         """
         Returns the dictionary mapping edges in the DEM to stabilizer measurement types. Updates the edge_type_d attribute of the class.
@@ -407,7 +382,6 @@ class CorrelatedDecoder:
                 decomposed_inst = self.decompose_dem_instruction_stim(inst)
 
                 for edge in decomposed_inst["detectors"]:
-                    # print(edge)
                     if tuple(sorted(edge)) in self.edge_type_d:
                         pass
                     else:
@@ -415,10 +389,225 @@ class CorrelatedDecoder:
                     
         return self.edge_type_d
     
+    def compute_edge_weights_from_conditional_probs(self, correction_edges, match_graph, cond_prob_dict):
+        weights = {}
+        fault_ids = {}
+        all_edges = match_graph.edges()
+        edges_in_correction = [tuple(sorted(edge)) for edge in correction_edges]
+        for u,v,data in all_edges:
+            e2 = tuple(sorted([-1 if x is None else x for x in (u, v)]))
+            p = max((cond_prob_dict.get(e1, {}).get(e2, 0) for e1 in edges_in_correction), default=0)
+            if p > 0:
+                weight = np.log((1-p)/p) 
+            else:
+                weight = data['weight']
+            weights[(u, v)] = weight
+            fault_ids[(u, v)] = data['fault_ids']
+        return weights, fault_ids
 
+    def build_matching_from_weights(self, weights_dict, fault_ids_dict, original_num_nodes):
+        match = Matching()
+        for (u, v), weight in weights_dict.items():
+            fault_id = fault_ids_dict.get((u,v),None)
+            if None in (u, v):
+                match.add_boundary_edge(u if u is not None else v, weight=weight, fault_ids=fault_id)
+            else:
+                match.add_edge(u, v, weight=weight, fault_ids=fault_id)
+        
+        # Now detect which nodes were never added via any edge
+        used_nodes = set()
+        for (u, v) in weights_dict.keys():
+            if u is not None:
+                used_nodes.add(u)
+            if v is not None:
+                used_nodes.add(v)
+
+        # Fill in unused detector nodes (not involved in any edge)
+        all_nodes = set(range(original_num_nodes))
+        missing_nodes = all_nodes - used_nodes
+
+        for node in missing_nodes:
+            # Use an extremely high weight to ensure these edges are not used
+            match.add_boundary_edge(node, weight=1e6)
+        
+
+        return match
+
+
+    #
+    # Hyperedge decomposition
+    #
+
+    
+    def decompose_dem_instruction(self, inst):
+        """
+        Decomposes a stim DEM instruction into pairwise detector edges and assigns observables
+        to the edges based on which sub-block (separated by `^`) the observable appeared in. Use
+        stim DEM instruction decomposition from decompose_errors=True to choose hyperedge 
+        decomposition
+
+        Example:
+            error(p) D0 D1^D2 L0 -> {p:p, detectors: [(0, -1), (2, -1)], observables: [None, 0]}
+            error(p) D0 D1 L0^D2 -> {p:p, detectors: [(0, 1), (-1, 2)], observables: [0, None]}
+            error(p) D0 D2 ^ D3 -> {p:p, detectors: [(0, 2), (-1, 3)], observables:[None, None]}
+            error(p) D0 -> {p: p, detectors: [(-1, 0)], observables: [None]} 
+
+        Returns:
+            {
+                'p': float,
+                'detectors': List[Tuple[int, int]],
+                'observables': List[Optional[int]],
+            }
+        """
+        targets = list(inst.targets_copy())
+        p = inst.args_copy()[0]
+
+        blocks = []  # Each block is a list of targets between separators (^)
+        current_block = []
+
+        for t in targets:
+            if t.is_separator():
+                if current_block:
+                    blocks.append(current_block)
+                    current_block = []
+            else:
+                current_block.append(t)
+
+        if current_block:
+            blocks.append(current_block)
+
+        detector_edges = []
+        edge_observables = []
+
+        for block in blocks:
+            dets = []
+            obs = []
+
+            for t in block:
+                if t.is_relative_detector_id():
+                    dets.append(t.val)
+                elif t.is_logical_observable_id():
+                    obs.append(t.val)
+
+            # Handle detectors → edges
+            if len(dets) == 0:
+                continue  # no detector => no edge
+            elif len(dets) == 1:
+                edge = (-1, dets[0])  # boundary edge
+                detector_edges.append(edge)
+                edge_observables.append(obs[0] if obs else None)
+            else:
+                # Decompose pairwise through chain
+                for i in range(len(dets) - 1):
+                    edge = tuple(sorted((dets[i], dets[i+1])))
+                    detector_edges.append(edge)
+                    edge_observables.append(obs[0] if obs else None)
+
+        return {
+            "p": p,
+            "detectors": detector_edges,
+            "observables": edge_observables
+        }
+
+
+    # 
+    # Edge decomposition tables 
+    #
+
+    def get_joint_prob(self, dem):
+        """ Creates an array of joint probabilities representing edges in the DEM. Each entry [E][F] is the joint probability of edges E and detector F. 
+            The diagonal entries [E][E] are the marginal probabilities of one graphlike error mechanism. The joint probabilities are calculated using the bernoulli formula for combining 
+            probabilities when two detectors share more than one hyperedge.
+
+            :param dem: stim.DetectorErrorModel object. The detector error model of the circuit to be used in decoding.
+            :return: joint_probs: dictionary {[edge 1][edge 2]: joint probability} The joint probability matrix. Each cell is the joint probability of two detectors.
+        """
+
+        
+        joint_probs = {} # each entry is the joint probability of two edges. [E][E] is a marginal probability
+        fault_ids = {} # each entry is the fault id for that edge
+
+        # iterate through each edge in the dem, add hyperedges
+        for inst in dem:
+            if inst.type == "error":
+                decomposed_inst = self.decompose_dem_instruction(inst) # used to be pairwise
+                prob_err = decomposed_inst["p"]
+                edges = decomposed_inst["detectors"]
+                observables = decomposed_inst["observables"]
+
+                # update hyperedges in joint probability table
+                if len(edges) > 1:
+                    a, b = edges[0], edges[1]
+                    p01 = joint_probs.get(a, {}).get(b, 0)
+                    p10 = joint_probs.get(b, {}).get(a, 0)
+
+                    new_p01 = self.bernoulli_prob(p01, prob_err)
+                    new_p10 = self.bernoulli_prob(p10, prob_err)
+
+                    joint_probs.setdefault(a, {})[b] = new_p01
+                    joint_probs.setdefault(b, {})[a] = new_p10
+
+                # update marginal probabilities
+                for i,edge in enumerate(edges):
+                    p = joint_probs.get(edge, {}).get(edge, 0)
+                    new_p = self.bernoulli_prob(p, prob_err)
+                    joint_probs.setdefault(edge, {})[edge] = new_p
+                    
+                    # assign fault ids
+                    obs = observables[i]
+                    fault_ids[edge] = fault_ids.get(edge) or obs
+                
+        return joint_probs, fault_ids 
+    
+    def get_conditional_prob(self, joint_prob_dict, decompose_biased):
+        """ Given a joint probability dictionary, calculates the conditional probabilities for each hyperedge. The conditional probability is given by 
+            P(A|B) = P(A^B)/P(A)
+            Where A and B are edges from decomposed hyperedges. The marginal probability is P(A), and the joint probability is P(A^B). The maximum conditional probability is 0.5
+            Only hyperedge components are present in final dictionary.
+
+            :param joint_prob_dict: the joint probability of decomposed hyperedge between edges A and B
+            :return: conditional probability nested dictionary. Of the same form as joint_prob_dict:
+                    {edge tuple 1:{edge tuple 1: marginal probability, edge tuple two: conditional probability, P(edge 2 | edge 1), ...}, ...} 
+        """
+
+        cond_prob_dict = {}
+
+        for edge_1 in joint_prob_dict:
+            # find P(A)
+            marginal_p = joint_prob_dict.get(edge_1, {}).get(edge_1,0)
+            if marginal_p == 0:
+                continue
+
+            adjacent_edge_dict = joint_prob_dict.get(edge_1, {})
+
+            # populate cond_prob dictionary 
+            for edge_2 in adjacent_edge_dict: 
+
+                if edge_1 == edge_2:  
+                    continue 
+
+                joint_p = joint_prob_dict.get(edge_1, {}).get(edge_2,0)
+                edge_check_type = self.edge_type_d[edge_2] 
+
+                scale = 1
+                if decompose_biased:
+                    if edge_check_type == "X": # edge_2 is a Z error since it's checks are X type.
+                        scale = self.eta/(self.eta + 1)
+                    elif edge_check_type == "Z": # edge_2 is an X error
+                        scale = 1/2*(self.eta + 1)
+
+
+                # conditional probability calculation. Min taken because weights cannot be negative, and eta=0.5 represents a full erasure channel
+                cond_p = min(0.5, scale*joint_p/marginal_p) 
+                cond_prob_dict.setdefault(edge_1, {})[edge_2] = cond_p
+        return cond_prob_dict
+
+
+    #########################################################################
     #
     # Complementary Gap
     #
+    #########################################################################
 
     def get_complementary_gap(self,circuit,syndrome,obs_flips, decoder_type="MWPM"):
         '''
@@ -439,7 +628,6 @@ class CorrelatedDecoder:
         
         
         '''    
-        # print(obs_flips.shape)
         dem = circuit.detector_error_model(decompose_errors=True, flatten_loops=True, approximate_disjoint_errors=True)
         num_shots = np.shape(syndrome)[0]
         comp_matching = Matching(enable_correlations=True)
@@ -558,10 +746,6 @@ class CorrelatedDecoder:
             pred0, W0 = comp_matching.decode_batch(det0, enable_correlations=True, return_weights=True)
             pred1, W1 = comp_matching.decode_batch(det1, enable_correlations=True, return_weights=True)
 
-        # print(f"w0 {W0}, w1 {W1}, wreg {W_reg}")
-        # print(f"pred0 {pred0}, pred1 {pred1}, pred_reg {pred_reg}")
-        # print(pred0, W0)
-        # print("now for the regular", pred_reg, W_reg)
         # scale by edge weight, get dB. Why do we do this? also do we assume all edges normalized by the weight of the first
         edge = next(iter(matching.to_networkx().edges.values()))
         edge_w = edge['weight']
@@ -585,24 +769,18 @@ class CorrelatedDecoder:
 
 
         for k in range(num_shots):
-            # if W_reg[k] == W0[k]: # not always the case for correlated matching ... haven't yet figured out why
-            if pred_reg[k] == pred0[k]: # if the regular matching is the same as the node fixed one, then we know that the node fixed one is the min weight solution
-                # print(f"running eq wreg and w0, shot {k}")
+            if pred_reg[k] == pred0[k]: 
                 W_min[k] = W0[k]
                 pred_min[k] = pred0[k]
                 W_comp[k] = W1[k]
-            # elif W_reg[k] == W1[k]:
             elif pred_reg[k] == pred1[k]:
-                # print(f"running eq wreg and w1, shot {k}")
                 W_min[k] = W1[k]
                 pred_min[k] = pred1[k]
                 W_comp[k] = W0[k]
 
             if pred_min[k]==obs_flips[k]: 
-                # print(f"appending signed gap for shot {k} positive")
                 Signed_Gap.append( (W_comp[k]-W_min[k]) * decibels_per_w) 
             else:
-                # print(f"appending signed gap for shot {k} negative")
                 Signed_Gap.append( (W_min[k]-W_comp[k]) * decibels_per_w) 
 
 
@@ -636,620 +814,13 @@ class CorrelatedDecoder:
 
 
         return Gap,Signed_Gap,gap_conditioned_PL
-    
-    def get_complementary_correction(self, dem, syndrome, observable_flip, input_matching=None, return_predictions=False):
-        """ For one shot at a time, get the unsigned gap, the matching and the complementary matching for one dem
-
-            :param dem: (stim.DetectorErrorModel) the input detector error model to be used in matching
-            :param syndrome: (numpy array) the detectors flipped in the experiment
-            :param observable_flip: (numpy array) whether a logical observable was flipped
-            :param matching: (Matching matching object) if you want to directly feed in a matching graph, use this instead of dem
-            :param return_predictions: (bool) include the prediction in the return value
-
-            :return unsigned_gap: (array) decoder confidence from comparing two matchings
-            :return matching_correction: (array) the edges included in the min weight solution
-            :return comp_matching_correction: (array) the edges in the solution to complementary solution
-            :return pred_min: (bool) whether the min weight decoder solution flipped a logical
-            :return pred_picked: (int) whether the solution is connected to boundaries(no boundaries) - 1(0)
-        """
-        
-        comp_matching = Matching()
-        if input_matching is None:
-            matching = Matching.from_detector_error_model(dem)
-        else:
-            matching = input_matching
-
-        syndrome = syndrome.reshape(1,syndrome.shape[0]) # I hope this is doing the right thing not sure it is
-        xlb_nodes, xrb_nodes, ztb_nodes, zbb_nodes = self.get_LB_RB_nodes(dem)
-
-        if self.mem_type == "X":
-            b1_nodes = xlb_nodes
-            b2_nodes = xrb_nodes
-        else:
-            b1_nodes = ztb_nodes
-            b2_nodes = zbb_nodes
 
 
-        b1 = max(b2_nodes)+1
-        b2 = b1+1
-        
-        for edge in matching.edges():
-            node1 = edge[0]
-            node2 = edge[1]
-
-
-            # when the edge is not a boundary add to the graph normally
-            if node2 is not None:
-                
-                comp_matching.add_edge(node1=node1,node2=node2,
-                                fault_ids = edge[2]['fault_ids'],
-                                weight=edge[2]['weight'],
-                                error_probability=edge[2]['error_probability'])
-            
-            # if the edge is a boundary edge 
-            else: 
-                if node1 in b1_nodes: # match to the left/top node
-                    node2 = b1 
-                if node1 in b2_nodes: # match to the right/bottom node
-                    node2 = b2 
-
-                # if the stabilizer is not of the memory type, keep to normal boundaries
-                if node2 is None:
-                    comp_matching.add_boundary_edge(node=node1,
-                                                    fault_ids = edge[2]['fault_ids'],
-                                                    weight=edge[2]['weight'],
-                                                    error_probability=edge[2]['error_probability'])
-
-                else:
-                    comp_matching.add_edge(node1=node1,node2=node2,
-                                    fault_ids = edge[2]['fault_ids'],
-                                    weight=edge[2]['weight'],
-                                    error_probability=edge[2]['error_probability'])            
-                
-        
-        comp_matching.set_boundary_nodes({b2})     
-                
-        # decode to obtain the original matching
-        pred_reg, W_reg = matching.decode(syndrome,return_weight=True) #This is the regular matching
-
-
-        # don't fire the b1 - I_L coset
-        new_array = np.zeros((1,1),dtype=int)
-        det0      = np.hstack((syndrome,new_array))
-        
-        # do fire b1 - Z/X_L coset
-        new_array = np.ones((1,1),dtype=int)
-        det1      = np.hstack((syndrome,new_array))
-
-        # pred0 crosses logical even number of times, pred1 crosses odd number. Return the total weights of the solutions for each shot
-        pred0, W0 = comp_matching.decode(det0,return_weight=True)
-        pred1, W1 = comp_matching.decode(det1,return_weight=True)
-
-        edges_in_pred0 = np.array(comp_matching.decode_to_edges_array(det0))
-        edges_in_pred1 = np.array(comp_matching.decode_to_edges_array(det1))
-
-
-        # signed gap
-        if W_reg == W0: # MWPM picked pred0 solution
-            pred_picked = 0
-            W_min = W0
-            pred_min = pred0
-            W_comp = W1
-            edges_in_correction = np.where(np.logical_or((edges_in_pred0 == b1) ,(edges_in_pred0 == b2)), -1, edges_in_pred0)
-            edges_in_comp_correction = np.where(np.logical_or((edges_in_pred1 == b1), (edges_in_pred1 == b2)), -1, edges_in_pred1)
-        else: # MWPM picked pred 1 solution 
-            pred_picked = 1
-            W_min = W1
-            pred_min = pred1
-            W_comp = W0
-            edges_in_correction = np.where(np.logical_or((edges_in_pred1 == b1), (edges_in_pred1 == b2)), -1, edges_in_pred1)
-            edges_in_comp_correction = np.where(np.logical_or((edges_in_pred0 == b1), (edges_in_pred0 == b2)), -1, edges_in_pred0)
-        
-
-        # if pred_min == observable_flip: # MWPM was successful 
-        #     signed_gap = W_comp - W_min
-        # else:
-        #     signed_gap = W_min - W_comp
-
-        unsigned_gap = W_comp - W_min
-
-
-        if return_predictions:
-            return unsigned_gap, edges_in_correction, edges_in_comp_correction, pred_min, pred_picked
-        else:
-            return unsigned_gap, edges_in_correction, edges_in_comp_correction
-
-
-
+    ########################################################################
     #
-    # Hyperedge decomposition (only decompose_dem_instruction_stim used)
+    # Circuit level correlated decoding functions
     #
-
-
-    def decompose_dem_instruction_stim_auto(self, inst):
-        """ Decomposes a stim DEM instruction into its component detectors and probability. Uses STIM's decompose_errors to determine hyperedge decomposition.
-            Decomposed edge is in the form {probability: [detector1, detector2, ...]}. Logical operators are omitted, and single detector errors are merged to a pair if decomposed.
-            We insert boundary edges to odd cardinality hyperedges. Edges are sorted such that boundary edges are always last in the tuple, and the detectors are in ascending order.
-
-            eg. error(p) D0 ^ D1 L0 -> {p: [(0, 1)]}
-                error(p) D0 D2 ^ D1 -> {p: [(0, 2), (1, "BOUNDARY")]}. 
-
-            :param inst: stim.DEMInstruction object. The instruction to be decomposed.
-            :return: decomp_inst: dict. A dictionary with the probability as the key and a list of edges as the value.
-        """
-        # get the edge probability and detectors for an instruction
-        prob_err = inst.args_copy()[0]
-        targets = np.array(inst.targets_copy())
-        decomp_inst = {prob_err: []}
-
-        
-        seperator_indices = np.where([target.is_separator() for target in targets])[0]
-        split_indices = seperator_indices + 1
-        edges = np.split(targets, split_indices)
-        edges = [[e.val for e in edge if e.is_relative_detector_id()] for edge in edges]
-        total_num_detectors = sum([len(edge) for edge in edges])
-        if total_num_detectors > 2:
-            for edge in edges:
-                if len(edge) % 2 == 1 and len(edges) > 1:
-                    edge.append("BOUNDARY")
-        
-        # Convert edges to list of tuples
-        if total_num_detectors <= 2:
-            # Flatten and group into one tuple if <= 2 detectors total
-            flattened = [e for edge in edges for e in edge]
-            edges = [tuple(sorted(flattened, key=lambda x: (isinstance(x, str), x)))]
-        else:
-            edges = [tuple(sorted(edge, key=lambda x: (isinstance(x,str), x))) for edge in edges]
-
-        # Store result
-        decomp_inst[prob_err] = edges
-
-        return decomp_inst
-    
-    def decompose_dem_instruction_stim(self, inst):
-        """
-        Decomposes a stim DEM instruction into pairwise detector edges and assigns observables
-        to the edges based on which sub-block (separated by `^`) the observable appeared in. Use
-        stim DEM instruction decomposition from decompose_errros=True to choose hyperedge 
-        decomposition
-
-        Example:
-            error(p) D0 D1^D2 L0 -> {p:p, detectors: [(0, -1), (2, -1)], observables: [None, 0]}
-            error(p) D0 D1 L0^D2 -> {p:p, detectors: [(0, 1), (-1, 2)], observables: [0, None]}
-            error(p) D0 D2 ^ D3 -> {p:p, detectors: [(0, 2), (-1, 3)], observables:[None, None]}
-            error(p) D0 -> {p: p, detectors: [(-1, 0)], observables: [None]} 
-
-        Returns:
-            {
-                'p': float,
-                'detectors': List[Tuple[int, int]],
-                'observables': List[Optional[int]],
-            }
-        """
-        targets = list(inst.targets_copy())
-        p = inst.args_copy()[0]
-
-        blocks = []  # Each block is a list of targets between separators (^)
-        current_block = []
-
-        for t in targets:
-            if t.is_separator():
-                if current_block:
-                    blocks.append(current_block)
-                    current_block = []
-            else:
-                current_block.append(t)
-
-        if current_block:
-            blocks.append(current_block)
-
-        detector_edges = []
-        edge_observables = []
-
-        for block in blocks:
-            dets = []
-            obs = []
-
-            for t in block:
-                if t.is_relative_detector_id():
-                    dets.append(t.val)
-                elif t.is_logical_observable_id():
-                    obs.append(t.val)
-
-            # Handle detectors → edges
-            if len(dets) == 0:
-                continue  # no detector => no edge
-            elif len(dets) == 1:
-                edge = (-1, dets[0])  # boundary edge
-                detector_edges.append(edge)
-                edge_observables.append(obs[0] if obs else None)
-            else:
-                # Decompose pairwise through chain
-                for i in range(len(dets) - 1):
-                    edge = tuple(sorted((dets[i], dets[i+1])))
-                    detector_edges.append(edge)
-                    edge_observables.append(obs[0] if obs else None)
-
-        return {
-            "p": p,
-            "detectors": detector_edges,
-            "observables": edge_observables
-        }
-
-    def decompose_dem_instruction_pairwise(self, inst):
-        """ Decomposes a stim DEM instruction into its component detectors and probability. Uses pairwise decomposition to determine hyperedge decomposition.
-            Decomposed edge is in the form {probability: [detector1, detector2, ...]}. Logical operators are omitted, and single detector errors are merged to a pair if decomposed.
-            We insert boundary edges to edges with one detector, boundary node value is -1. Edges are sorted such that boundary edges are always last in the tuple, and the detectors are in ascending order.
-
-
-            eg. error(p) D0 D1 L0 -> {p: p, detectors: [(0, 1)], observables: [0]}
-                error(p) D0 -> {p: p, detectors: [(-1, 0)], observables: []} single detector error gets boundary edge
-                error(p) D0 D2 D1 -> {p:p, detectors: [(0, 2), (2, 1)], observables: []}. 
-                error(p) D0 D2 ^ D3 -> {p:p, detectors: [(0, 2), (2, 3)], observables:[]} We choose to ignore ^. If we treated the ^ as already decomposing, we would get [(0,2), (3,-1)]
-                error(p) D0 D2 D3 L0 -> {p:p, detectors: [(0, 2), (2, 3)], observables:[0]}. 
-
-            :param inst: stim.DEMInstruction object. The instruction to be decomposed.
-            :return: decomp_inst: dict. A dictionary recording the probability of the error for that DEM instruction, the edges included in the
-            decomposition, and the logical observables included.
-        """
-        # get the edge probability and detectors for an instruction
-        targets = list(inst.targets_copy())
-        decomp_inst = {"p": inst.args_copy()[0], "detectors": [], "observables": []}
-
-        # separate detectors, logical observables, and separators
-        for t in targets:
-            if t.is_separator():
-                continue
-            elif t.is_logical_observable_id():
-                # logical observable: L#
-                decomp_inst["observables"].append(t.val)
-            elif t.is_relative_detector_id():
-                # detector: D#
-                decomp_inst["detectors"].append(t.val)
-        
-        total_num_detectors = len(decomp_inst["detectors"])
-
-        # iterate through array and make pairwise edge tuples with probability prob_err
-        detectors = decomp_inst["detectors"]
-        edges = []
-
-        if total_num_detectors == 1:
-            edges = [(-1, detectors[0])] # include a boundary edge
-        
-        else: # pairwise decompose
-            for i in range(total_num_detectors-1):
-                edges.append(tuple(sorted([detectors[i], detectors[i+1]])))
-        
-        # store result
-        decomp_inst["detectors"] = edges
-        return decomp_inst
-    
-    def decompose_dem_instruction_star(self, inst):
-        """ Decomposes a stim DEM instruction into its component detectors and probability. Uses star decomposition to determine hyperedge decomposition.
-            Decomposed edge is in the form {probability: [detector1, detector2, ...]}. Logical operators are omitted, and single detector errors are merged to a pair if decomposed.
-            We insert boundary edges to edges with one detector, boundary node value is -1. Edges are sorted such that boundary edges are always last in the tuple, and the detectors are in ascending order.
-            PASS IN DEM with DECOMPOSE_ERRORS=FALSE - talk to ken about this
-
-
-            eg. error(p) D0 D1 L0 -> {p: p, detectors: [(0, 1)], observables: [0]}
-                error(p) D0 -> {p: p, detectors: [(0, -1)], observables: []} single detector error gets boundary edge
-                error(p) D0 D2 D1 -> {p:p, detectors: [(0, 2), (0, 1)], observables: []}. 
-                error(p) D0 D2 ^ D3 -> {p:p, detectors: [(0, 2), (2, 3)], observables:[]} We choose to ignore ^. If we treated the ^ as already decomposing, we would get [(0,2), (3,-1)]
-                error(p) D0 D2 D3 L0 -> {p:p, detectors: [(0, 2), (0, 3)], observables:[0]}. 
-
-            :param inst: stim.DEMInstruction object. The instruction to be decomposed.
-            :return: decomp_inst: dict. A dictionary recording the probability of the error for that DEM instruction, the edges included in the
-            decomposition, and the logical observables included.
-        """
-        # get the edge probability and detectors for an instruction
-        targets = list(inst.targets_copy())
-        decomp_inst = {"p": inst.args_copy()[0], "detectors": [], "observables": []}
-
-        # separate detectors, logical observables, and separators
-        for t in targets:
-            if t.is_separator():
-                continue
-            elif t.is_logical_observable_id():
-                # logical observable: L#
-                decomp_inst["observables"].append(t.val)
-            elif t.is_relative_detector_id():
-                # detector: D#
-                decomp_inst["detectors"].append(t.val)
-        
-        total_num_detectors = len(decomp_inst["detectors"])
-
-        # iterate through array and make pairwise edge tuples with probability prob_err
-        detectors = decomp_inst["detectors"]
-        edges = []
-
-        if total_num_detectors == 1:
-            edges = [(-1, detectors[0])] # include a boundary edge
-        
-        else: # star decompose
-            center_node = detectors[0]
-            for i in range(total_num_detectors-1):
-                edges.append(tuple(sorted([center_node, detectors[i+1]])))
-        
-        # store result
-        decomp_inst["detectors"] = edges
-        return decomp_inst
-
-    # 
-    # Edge decomposition tables 
-    #
-
-    def get_joint_prob(self, dem):
-        """ Creates an array of joint probabilities representing edges in the DEM. Each entry [E][F] is the joint probability of edges E and detector F. 
-            The diagonal entries [E][E] are the marginal probabilities of one graphlike error mechanism. The joint probabilities are calculated using the bernoulli formula for combining 
-            probabilities when two detectors share more than one hyperedge.
-
-            :param dem: stim.DetectorErrorModel object. The detector error model of the circuit to be used in decoding.
-            :return: joint_probs: dictionary {[edge 1][edge 2]: joint probability} The joint probability matrix. Each cell is the joint probability of two detectors.
-        """
-
-        
-        joint_probs = {} # each entry is the joint probability of two edges. [E][E] is a marginal probability
-        fault_ids = {} # each entry is the fault id for that edge
-
-        # iterate through each edge in the dem, add hyperedges
-        for inst in dem:
-            if inst.type == "error":
-                decomposed_inst = self.decompose_dem_instruction_stim(inst) # used to be pairwise
-                prob_err = decomposed_inst["p"]
-                edges = decomposed_inst["detectors"]
-                observables = decomposed_inst["observables"]
-
-                # update hyperedges in joint probability table
-                if len(edges) > 1:
-                    a, b = edges[0], edges[1]
-                    p01 = joint_probs.get(a, {}).get(b, 0)
-                    p10 = joint_probs.get(b, {}).get(a, 0)
-
-                    new_p01 = self.bernoulli_prob(p01, prob_err)
-                    new_p10 = self.bernoulli_prob(p10, prob_err)
-
-                    joint_probs.setdefault(a, {})[b] = new_p01
-                    joint_probs.setdefault(b, {})[a] = new_p10
-
-                # update marginal probabilities
-                for i,edge in enumerate(edges):
-                    p = joint_probs.get(edge, {}).get(edge, 0)
-                    new_p = self.bernoulli_prob(p, prob_err)
-                    joint_probs.setdefault(edge, {})[edge] = new_p
-                    
-                    # assign fault ids
-                    obs = observables[i]
-                    # obs = observables
-                    fault_ids[edge] = fault_ids.get(edge) or obs
-                
-        return joint_probs, fault_ids 
-    
-    def get_conditional_prob(self, joint_prob_dict, decompose_biased):
-        """ Given a joint probability dictionary, calculates the conditional probabilities for each hyperedge. The conditional probability is given by 
-            P(A|B) = P(A^B)/P(A)
-            Where A and B are edges from decomposed hyperedges. The marginal probability is P(A), and the joint probability is P(A^B). The maximum conditional probability is 0.5
-            Only hyperedge components are present in final dictionary.
-
-            :param joint_prob_dict: the joint probability of decomposed hyperedge between edges A and B
-            :return: conditional probability nested dictionary. Of the same form as joint_prob_dict:
-                    {edge tuple 1:{edge tuple 1: marginal probability, edge tuple two: conditional probability, P(edge 2 | edge 1), ...}, ...} 
-        """
-
-        cond_prob_dict = {}
-
-        for edge_1 in joint_prob_dict:
-            # find P(A)
-            marginal_p = joint_prob_dict.get(edge_1, {}).get(edge_1,0)
-            if marginal_p == 0:
-                continue
-
-            adjacent_edge_dict = joint_prob_dict.get(edge_1, {})
-
-            # populate cond_prob dictionary 
-            for edge_2 in adjacent_edge_dict: # in the other function, e1 is edge in correction and e2 is the edge affected. Here it is different
-
-                if edge_1 == edge_2:  
-                    continue 
-
-                joint_p = joint_prob_dict.get(edge_1, {}).get(edge_2,0)
-                edge_check_type = self.edge_type_d[edge_2] # have to make sure this is populated by the time I populate
-                # print(edge_check_type, edge_2)
-
-                scale = 1
-                if decompose_biased:
-                    if edge_check_type == "X": # edge_2 is a Z error since it's checks are X type.
-                        scale = self.eta/(self.eta + 1)
-                    elif edge_check_type == "Z": # edge_2 is an X error
-                        scale = 1/2*(self.eta + 1)
-
-
-                # conditional probability calculation. Min taken because weights cannot be negative, and eta=0.5 represents a full erasure channel
-                # cond_p = min(1/(2*self.eta + 1), joint_p/marginal_p) # how do I do directionality here / I might have to think about it, will this actually work? Dont wanna fully erase edges...?
-                cond_p = min(0.5, scale*joint_p/marginal_p) # trying to include the channel, not sure about directionaility still
-                cond_prob_dict.setdefault(edge_1, {})[edge_2] = cond_p
-        return cond_prob_dict
-
-    #
-    # Graph construction
-    #
-
-    def edit_dem(self, edges_in_correction, dem, cond_prob_dict):
-        """ Given a stim DEM, updates the probabilities in error instructions with detectors given by cond_prob_dict based on detectors fired in correction.
-            If a detector edge picked in the correction has a key in cond_prob_dict, it belonged to a hyperedge. The conditional probability then overwrites
-            the original DEM probability for that hyperedge. Logical observables are distributed across new error instructions as in the original instruction.
-        """
-        # get a list of corrected edges from the first round
-        edges_in_correction = [tuple(sorted(edge)) for edge in edges_in_correction]
-
-        # iterate through the dem and fix the probabilities if they're in the cond_prob_dict
-        # Create new DEM with updated probabilities
-        new_dem = stim.DetectorErrorModel()
-
-        for inst in dem:
-            if inst.type == "error":
-                old_prob = inst.args_copy()[0]
-                decomposed_inst = self.decompose_dem_instruction_pairwise(inst)
-                
-                if len(decomposed_inst["detectors"]) > 1: # if the edge is a hyperedge
-                    
-                    for edge_1 in decomposed_inst["detectors"]: # break each hyperedge into sub-edges with their conditional prob
-                        new_prob = old_prob
-                        for edge_2 in edges_in_correction: # check which conditional probability is highest out of hyperedges
-                            curr_prob = cond_prob_dict.get(edge_2, {}).get(edge_1,0)
-                            new_prob = max(curr_prob, new_prob)
-                        
-                        targets = [stim.target_relative_detector_id(node) for node in edge_1] # will I have a problem with value -1?
-
-                        if len(decomposed_inst["observables"]) > 0:
-                            targets += [stim.target_logical_observable_id(l) for l in decomposed_inst["observables"]]
-                        
-                        new_inst = stim.DemInstruction("error", [new_prob], targets) # targets in edge_1 only
-                        new_dem.append(new_inst)
-                    
-                    
-                else: # if the edge is not a hyperedge, leave it be
-                    new_dem.append(inst) 
-            else:
-                new_dem.append(inst)  # Preserve non-error instructions like detectors or shifts
-
-
-        return new_dem
-
-    def compute_edge_weights_from_conditional_probs(self, correction_edges, match_graph, cond_prob_dict, fault_ids_dict):
-        weights = {}
-        fault_ids = {}
-        all_edges = match_graph.edges()
-        # print(fault_ids_dict)
-        edges_in_correction = [tuple(sorted(edge)) for edge in correction_edges]
-        for u,v,data in all_edges:
-            # print(u,v)
-            e2 = tuple(sorted([-1 if x is None else x for x in (u, v)]))
-            # print(e2)
-            log_error = fault_ids_dict.get(e2, None)
-            # print(log_error)
-            p = max((cond_prob_dict.get(e1, {}).get(e2, 0) for e1 in edges_in_correction), default=0)
-            if p > 0:
-                weight = np.log((1-p)/p) 
-                # print(f"updating edge {(u,v)} with conditional probability {p} and weight {weight}, from weight {data['weight']}")
-            else:
-                weight = data['weight']
-            weights[(u, v)] = weight
-            # fault_ids[(u, v)] = set([log_error]) if log_error is not None else set()
-            fault_ids[(u, v)] = data['fault_ids']
-            # this fault id has indices with (node, None): set(id)
-        # print(fault_ids)
-        return weights, fault_ids
-    
-    def compute_edge_weights_from_comp_gap(self, correction_edges, comp_correction_edges, matching, unsigned_gap, cutoff):
-        """ Adjust the edge weights based on the complementary gap obtained during first pass matching.
-            Use the signed gap to determine whether to use the min weight or complementary correction. 
-
-            :param correction_edges(list): list of node pairs that represent the edges in the first MWPM pass
-            :param comp_correction_edges(list): list of node pairs that represent the spatial complementary error in MWPM first pass
-            :param matching(Matching): the matching graph to be updated
-            :param unsigned_gap(float): magnitude represents first pass decoder confidence (sum of weights). 
-            :param cutoff(float): the gap magnitude that is lower than the relative weights. Determines whether
-                                we assign the gap to the complementary or minimum error path.
-            :return: the weights and fault_ids dictionary recording the adjusted weight for each edge in the matchgraph
-        """
-
-        weights = {}
-        fault_ids = {}
-
-        sorted_edges_in_correction = [tuple(sorted(edge)) for edge in correction_edges]
-        sorted_comp_correction_edges = [tuple(sorted(edge)) for edge in comp_correction_edges]
-
-        mwpm_correction = [edge for edge in sorted_edges_in_correction if edge not in sorted_comp_correction_edges]
-        comp_correction = [edge for edge in sorted_comp_correction_edges if edge not in sorted_edges_in_correction]
-
-        edge_weight_dB_scale = self.get_dB_scaling(matching)
-        
-        for u,v,data in matching.edges():
-            # fix the boundary nodes comparison because pymatching is inconsistent
-            edge = tuple([u if (v is not None) else -1, v if (v is not None) else u])
-            
-            if np.abs(edge_weight_dB_scale*unsigned_gap) <= cutoff: # when the confidence is low choose the complementary path
-                if edge in mwpm_correction:
-                    weights[(u,v)] = 1e6
-                else:
-                    weights[(u,v)] = data['weight']
-            else:
-                weights[(u,v)] = data['weight'] # maybe try the other way later ... 
-                # if edge in comp_correction:
-                #     weights[(u,v)] = np.abs(edge_weight_dB_scale*signed_gap)
-                # else:
-                #     weights[(u,v)] = data['weight']
-        
-            fault_ids[(u,v)] = data['fault_ids']
-        return weights, fault_ids
-    
-    def compute_edge_weights_all_correlated_info(self, correction_edges, matching, unsigned_gap, cond_prob_dict, fault_ids_dict):
-        # definitely add stopping conditions if decoder is already right
-        # when getting the hyperedge corrections, check if the comp decoder was right first too 
-        
-        weights = {}
-        fault_ids = {}
-        edges_in_correction = [tuple(sorted(edge)) for edge in correction_edges]
-        for u,v,data in matching.edges():
-
-            # edges in the correction get adjusted by unsigned gap
-            if (u,v) in edges_in_correction:
-                print(f"{u,v} weight adjusted by unsigned gap")
-                weight = 1/unsigned_gap
-
-            # edges not in the correction get hyperedge adjustments
-            else:
-                e2 = tuple(sorted([-1 if x is None else x for x in (u, v)])) # get (u,v) to the proper bndry format given my code
-                
-                # find the max conditional probability adjustment for this edge given the correction
-                p = max((cond_prob_dict.get(e1, {}).get(e2, 0) for e1 in edges_in_correction), default=0) 
-
-                if p > 0:
-                    print(f"{u,v} weight adjusted by cond prob")
-                    weight = np.log((1-p)/p) 
-                else:
-                    weight = data['weight']
-            fault_ids[(u, v)] = data['fault_ids']
-            weights[(u, v)] = weight
-
-        return weights, fault_ids
-
-    def build_matching_from_weights(self, weights_dict, fault_ids_dict, original_num_nodes, b_extra=None):
-        match = Matching()
-        for (u, v), weight in weights_dict.items():
-            # fault_id = fault_ids_dict.get(tuple([u if v is not None else -1, v if v is not None else u]), None)
-            # print(fault_id, u,v)
-            fault_id = fault_ids_dict.get((u,v),None)
-            if None in (u, v):
-                match.add_boundary_edge(u if u is not None else v, weight=weight, fault_ids=fault_id)
-            else:
-                match.add_edge(u, v, weight=weight, fault_ids=fault_id)
-        
-        # Now detect which nodes were never added via any edge
-        used_nodes = set()
-        for (u, v) in weights_dict.keys():
-            if u is not None:
-                used_nodes.add(u)
-            if v is not None:
-                used_nodes.add(v)
-
-        # Fill in unused detector nodes (not involved in any edge)
-        all_nodes = set(range(original_num_nodes))
-        missing_nodes = all_nodes - used_nodes
-
-        for node in missing_nodes:
-            # Use an extremely high weight to ensure these edges are not used
-            match.add_boundary_edge(node, weight=1e6)
-        
-        if b_extra is not None:
-            match.set_boundary_nodes({b_extra})
-
-        return match
-
-
-    #
-    # Decoding
-    #
+    ########################################################################
 
     def decoding_failures_correlated_circuit_level(
             self, 
@@ -1257,23 +828,20 @@ class CorrelatedDecoder:
             shots, 
             mem_type, 
             CD_type, 
-            decompose_biased=True, 
-            return_weights=False, 
+            decompose_biased=True,
             input_syndrome=None, 
-            input_obs_flips=None, 
-            comp_matching=None,
-            b_extra=None,
+            input_obs_flips=None,
             ):
         """
         Finds the number of logical errors given a circuit using correlated decoding. Uses pymatching's correlated decoding approach, inspired by
         papers cited in the README.
         :param circuit: stim.Circuit object, the circuit to decode
-        :param p: physical error rate
         :param shots: number of shots to sample
-        :param memtype: basis to run memory experiment
+        :param mem_type: basis to run memory experiment
         :param CD_type: the clifford deformation type applied to the code
         :param decompose_biased: whether to decompose hyperedges with bias in mind or give equal weight to X and Z components
-        :param return_weights: whether to return the weights of the total path
+        :param input_syndrome: optional, pre-sampled syndrome to use for decoding instead of sampling from the circuit
+        :param input_obs_flips: optional, pre-sampled observable flips to use for decoding
         :return: number of logical errors
         """
 
@@ -1283,10 +851,7 @@ class CorrelatedDecoder:
 
         # get the DEM get the matching graph
         dem = circuit.detector_error_model(decompose_errors=True, flatten_loops=True, approximate_disjoint_errors=True)
-        if comp_matching is not None:
-            matchgraph = comp_matching
-        else:
-            matchgraph = Matching.from_detector_error_model(dem, enable_correlations=False)
+        matchgraph = Matching.from_detector_error_model(dem, enable_correlations=False)
         
         self.edge_type_d = self.get_edge_type_d(dem, mem_type, CD_type)
 
@@ -1296,126 +861,43 @@ class CorrelatedDecoder:
         # calculate the conditional probabilities based on joint probablities and marginal probabilities 
         cond_prob_dict = self.get_conditional_prob(joint_prob_dict, decompose_biased)
 
-        # instead of performing the first round of error correction and going based on this, create a MWPM graph based on hyperedges in joint_prob_dict
-
-        # new_dem = edit_dem() 
-
         
         
         #
         # Decode the circuit
         #
         
-        # first round of decoding
         # get the syndromes and observable flips
         if input_syndrome is None and input_obs_flips is None:
             seed = np.random.randint(0, 2**32 - 1)
             sampler = circuit.compile_detector_sampler(seed=seed)
             syndrome, observable_flips = sampler.sample(shots, separate_observables=True)
-            # print(syndrome.shape, observable_flips.shape)
         else: 
             syndrome, observable_flips = input_syndrome, input_obs_flips
-            # print(syndrome.shape, observable_flips.shape)
-        # print("syndrome inside function:", syndrome )
 
-        # from eva
-        # change the logicals so that there is an observable for each qubit, change back to the code cap case to check whether the real logical flipped
 
-        corrections = np.zeros((shots, 1)) # largest fault id is 1, len of correction = 2 .... i changed this to 1 bc i have no clue why it was 2
-        weights = np.zeros(shots)
+        corrections = np.zeros((shots, 1))
         for i in range(shots):
-
-            # print(syndrome[i].shape)
+            # first round of matching
             edges_in_correction = matchgraph.decode_to_edges_array(syndrome[i])
-            # print("edges in correction inside function from mycorr", edges_in_correction)
 
-            
-            # update weights based on conditional probabilities
-            # updated_dem = self.edit_dem(edges_in_correction, dem, cond_prob_dict) # is this DEM updated correctly? make sure that it is getting the right edges
-
-            # second round of decoding with updated weights
-            # matching_corr = Matching.from_detector_error_model(updated_dem, enable_correlations=False)
+            # second round of matching
             updated_weights, fault_ids_dict = self.compute_edge_weights_from_conditional_probs(edges_in_correction, matchgraph, cond_prob_dict, fault_ids)
-            matching_corr = self.build_matching_from_weights(updated_weights, fault_ids_dict, matchgraph.num_nodes, b_extra=b_extra)
-            # print("updated edges inside function from mycorr", matching_corr.edges())
-            # print(matching_corr.decode(syndrome[i]).shape, matching_corr.decode(syndrome[i]))
-            if return_weights:
-                corrections[i], weights[i] = matching_corr.decode(syndrome[i], return_weight=True)
-            else:
-                corrections[i] = matching_corr.decode(syndrome[i])
+            matching_corr = self.build_matching_from_weights(updated_weights, fault_ids_dict, matchgraph.num_nodes)
+            corrections[i] = matching_corr.decode(syndrome[i])
 
         
         # calculate the number of logical errors
         log_errors_array = np.any(np.array(observable_flips) != np.array(corrections), axis=1) # usual code
-        if return_weights:
-            return corrections, weights
-        else:
-            return log_errors_array
-
-    def decoding_failures_correlated_gap(self, circuit, shots, mem_type, CD_type, cutoff=1):
-        """
-        Two stage decoding following arxiv:2312.04522., with the addition of a hyperedge decoding step.
-        """
-
-        # get the hyperedge data + set up original matching
-        dem = circuit.detector_error_model(decompose_errors=True, flatten_loops=True, approximate_disjoint_errors=True)
-        matchgraph = Matching.from_detector_error_model(dem, enable_correlations=False)
-        self.edge_type_d = self.get_edge_type_d(dem, mem_type, CD_type)
-
-        # get the joint probabilities table of the dem hyperedges
-        joint_prob_dict, fault_ids = self.get_joint_prob(dem)
-        
-        # calculate the conditional probabilities based on joint probablities and marginal probabilities 
-        cond_prob_dict = self.get_conditional_prob(joint_prob_dict, decompose_biased=False)
-
-
-
-        #
-        # Decode the circuit
-        #
-        
-        # first round of decoding
-        # get the syndromes and observable flips
-        seed = np.random.randint(0, 2**32 - 1)
-        sampler = circuit.compile_detector_sampler(seed=seed) # should I be passing in a seed instead so I am comparing LER of right shots?
-        detection_events, observable_flips = sampler.sample(shots, separate_observables=True)
-
-        
-        corrections = np.zeros(observable_flips.shape)
-        for shot in range(shots):
-            us_gap, edges_in_correction, edges_in_comp_correction, pred_min, pred_picked = self.get_complementary_correction(dem, detection_events[shot], observable_flips[shot], return_predictions=True)
-
-            
-            # when the first pass of MWPM is not confident, get the complementary graph 
-            if us_gap < cutoff:
-                comp_weights,comp_fault_ids = self.compute_edge_weights_from_comp_gap(edges_in_correction,edges_in_comp_correction, matchgraph, us_gap, cutoff)
-                comp_matching = self.build_matching_from_weights(comp_weights, comp_fault_ids, matchgraph.num_nodes)
-
-                # hyperedge adjustment based on comp correction
-                hyperedge_weights, hyperedge_fault_ids = self.compute_edge_weights_from_conditional_probs(edges_in_comp_correction,
-                                                                                                                comp_matching,
-                                                                                                                cond_prob_dict,
-                                                                                                                comp_fault_ids)
-
-            else: # the first correction is confident, just do regular hyperedge decomposition on correction
-                hyperedge_weights, hyperedge_fault_ids = self.compute_edge_weights_from_conditional_probs(edges_in_correction,
-                                                                                                                matchgraph,
-                                                                                                                cond_prob_dict,
-                                                                                                                fault_ids)
-            hyperedge_matching = self.build_matching_from_weights(hyperedge_weights, hyperedge_fault_ids,matchgraph.num_nodes)
-            
-            corrections[shot] = hyperedge_matching.decode(detection_events[shot])
-        
-        log_errors_array = np.any(np.array(observable_flips) != np.array(corrections), axis=1)
-
         return log_errors_array
 
+    
 
-    #
+    ########################################################################
     #
     # Circuit sampling functions
     #
-    #
+    ########################################################################
 
     def get_num_log_errors(self, circuit, num_shots):
         """
@@ -1457,8 +939,8 @@ class CorrelatedDecoder:
             dem = circuit.detector_error_model(decompose_errors=enable_pymatch_corr, approximate_disjoint_errors=True)
             matchgraph = Matching.from_detector_error_model(dem,enable_correlations=enable_pymatch_corr)
             seed = np.random.randint(0, 2**32 - 1)
-            sampler = circuit.compile_detector_sampler(seed=seed) # double check that this randomness is doing the right thing, every shot should be random and compare
-            syndrome, observable_flips = sampler.sample(num_shots, separate_observables=True) # do i need to set a seed here?
+            sampler = circuit.compile_detector_sampler(seed=seed)
+            syndrome, observable_flips = sampler.sample(num_shots, separate_observables=True) 
             predictions = matchgraph.decode_batch(syndrome, enable_correlations=enable_pymatch_corr) # had a weird recent error, should have thrown an error earlier when I passed in enable correlations
             log_errors_array = np.any(np.array(observable_flips) != np.array(predictions), axis=1)
         
@@ -1483,7 +965,9 @@ class CorrelatedDecoder:
         for p in p_list:
             # make the circuit
             circuit_obj = cc_circuit.CDCompassCodeCircuit(self.d, self.l, self.eta, meas_type) # change list of ps dependent on model
-            if noise_model == "code_cap":# change this based on the noise model you want
+            
+            # choose a noise model
+            if noise_model == "code_cap":
                 circuit = circuit_obj.make_elongated_circuit_from_parity(0,0,0,p,0,0,CD_type=cd_type, memory=False)  
             elif noise_model == "phenom":
                 circuit = circuit_obj.make_elongated_circuit_from_parity(p,0,0,p,0,0,CD_type=cd_type, phenom_meas=True) # check the plots that matched pymatching to get error model right, before meas flip and data qubit pauli between rounds
@@ -1496,25 +980,4 @@ class CorrelatedDecoder:
             log_error_L.append(log_errors_array)
 
         return log_error_L
-
-    def get_log_error_p(self, p_list, meas_type, num_shots):
-        """ 
-        Get the logical error rate for a list of physical error rates of gates at code cap using a circuit
-        :param p_list: list of p values
-        :param meas_type: type of memory experiment(X or Z), stabilizers measured
-        :param num_shots: number of shots to sample
-        :return: list of logical error rates
-        """
-        log_error_L = []
-        for p in p_list:
-            # make the circuit
-            circuit = cc_circuit.CDCompassCodeCircuit(self.d, self.l, self.eta, [0.003, 0.001, p], meas_type)
-            log_errors = self.get_num_log_errors(circuit.circuit, num_shots)
-            log_error_L += [log_errors/num_shots]
-        return log_error_L
-
-
-
-
-
 
