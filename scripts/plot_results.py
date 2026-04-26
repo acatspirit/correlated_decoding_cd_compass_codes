@@ -1,3 +1,11 @@
+"""
+The plotting functions used to get figures in paper. The plotting functions were substantially edited by ChatGPT.
+
+Author: Arianna Meinking
+Date: April 25, 2026
+"""
+
+
 from matplotlib.lines import Line2D
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,6 +16,7 @@ import os
 from scipy.optimize import curve_fit
 import io
 import requests
+from run_simulations import shots_averaging
 
 
 
@@ -19,13 +28,11 @@ import requests
 #
 ######################
 
-
-def full_error_plot(full_df, curr_eta, curr_l, curr_num_shots, noise_model, CD_type, file, corr_decoding=False, py_corr=False, loglog=False, averaging=True, circuit_level=False, plot_by_l=False):
-    """Make a plot of all errors given a df with unedited contents of an entire CSV.
+def full_error_plot(full_df, curr_eta, curr_l, noise_model, CD_type, file, corr_decoding=False, py_corr=False, loglog=False, averaging=True, circuit_level=False, plot_by_l=False):
+    """Make a threshold plot using entire CSV with weighting by number of shots for LER contribution.
         :param full_df: pandas DataFrame with unedited contents from CSV
         :param curr_eta: current noise bias to filter DataFrame
         :param curr_l: current elongation parameter to filter DataFrame
-        :param curr_num_shots: current number of shots to filter DataFrame
         :param noise_model: the type of simulation, either "code_cap", "phenom", or "circuit_level"
         :param CD_type: the type of clifford deformation used, from a list ["SC", "XZZXonSqu", "ZXXZonSqu"]
         :param py_corr: boolean whether pymatching correlated decoding was used, chooses from last of list ["CORR_XZ", "CORR_ZX", "X_MEM", "Z_MEM", "TOTAL_MEM", "X_MEM_PY", "Z_MEM_PY", "TOTAL_MEM_PY"]
@@ -38,11 +45,6 @@ def full_error_plot(full_df, curr_eta, curr_l, curr_num_shots, noise_model, CD_t
         :return: no return, shows a matplotlib plot
     """
 
-    # prob_scale = get_prob_scale(corr_type, curr_eta)
-
-    # Filter the DataFrame based on the input parameters
-    # filtered_df = full_df[(full_df['l'] == curr_l) & (full_df['eta'] == curr_eta) & (full_df['num_shots'] == curr_num_shots)] 
-                    # & (df['time_stamp'].apply(lambda x: x[0:10]) == datetime.today().date())
     
     filtered_df = full_df[
     (full_df['l'] == curr_l) &
@@ -63,7 +65,6 @@ def full_error_plot(full_df, curr_eta, curr_l, curr_num_shots, noise_model, CD_t
 
     # Get unique error types and unique d values
     error_types = filtered_df['error_type'].unique()
-
     d_values = filtered_df['d'].unique()
 
 
@@ -120,85 +121,12 @@ def full_error_plot(full_df, curr_eta, curr_l, curr_num_shots, noise_model, CD_t
     plt.tight_layout()
     plt.show()
 
-def threshold_plot_old(full_df, p_th0, p_range, curr_eta, curr_l, curr_num_shots, corr_type, CD_type, noise_model, file, circuit_level=False, py_corr = False, corr_decoding=False, loglog=False, averaging=True, show_threshold=True, show_fit=False):
-    """Make a plot of all 4 errors given a df with unedited contents"""
-
-    prob_scale = get_prob_scale(corr_type, curr_eta)
-
-    # Filter the DataFrame based on the input parameters
-    filtered_df = full_df[(full_df['p'] > p_th0 - p_range)&(full_df['p'] < p_th0 + p_range)&(full_df['l'] == curr_l) & (full_df['eta'] == curr_eta) & (full_df['noise_model'] == noise_model) & (full_df['CD_type'] == CD_type)]
-    
-    if py_corr: 
-        filtered_df = filtered_df[filtered_df['error_type'].isin(['X_MEM_PY', 'Z_MEM_PY', 'TOTAL_MEM_PY'])]
-    elif corr_decoding:
-        filtered_df = filtered_df[filtered_df['error_type'].isin(['X_MEM_CORR', 'Z_MEM_CORR', 'TOTAL_MEM_CORR'])]
-    else:
-        if circuit_level:
-            filtered_df = filtered_df[filtered_df['error_type'].isin(['X_MEM', 'Z_MEM', 'TOTAL_MEM'])]
-        else:
-            filtered_df = filtered_df[filtered_df['error_type'].isin(['X', 'Z', 'TOTAL', 'CORR_XZ', 'CORR_ZX'])]
-    
-    
-    d_values = filtered_df['d'].unique()
-    num_lines = len(d_values)
-    cmap = colormaps['Blues_r']
-    color_values = np.linspace(0.1, 0.8, num_lines)
-    colors = [cmap(val) for val in color_values]
-
-    # Create a figure with subplots for each error type
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-    
-    # Plot each d value
-    for i,d in enumerate(d_values):
-        d_df = full_df[(full_df['d'] == d)&(full_df['error_type'] == corr_type)&(full_df['l'] == curr_l) & (full_df['eta'] == curr_eta)]
-        if averaging:
-            d_df_mean = shots_averaging(None, curr_l, curr_eta, corr_type, d_df, CD_type, file)
-            if loglog:
-                ax.loglog(d_df_mean['p']*prob_scale, d_df_mean['num_log_errors'],  label=f'd={d}', color=colors[i])
-                error_bars = 10**(-6)*np.ones(len(d_df_mean['num_log_errors']))
-                ax.fill_between(d_df_mean['p']*prob_scale, d_df_mean['num_log_errors'] - error_bars, d_df_mean['num_log_errors'] + error_bars, alpha=0.2, color=colors[i])
-            else:
-                ax.plot(d_df_mean['p']*prob_scale, d_df_mean['num_log_errors'],  label=f'd={d}', color=colors[i])
-        else:
-            ax.scatter(d_df['p']*prob_scale, d_df['num_log_errors'], s=2, label=f'd={d}',color=colors[i])
-
-    popt, pcov = get_threshold(filtered_df, p_th0, p_range, curr_l, curr_eta, corr_type,curr_num_shots, CD_type)
-    pth = popt[0]
-    pth_error = np.sqrt(np.diag(pcov))[0]
-    
-    if show_threshold:
-        ax.vlines(pth, ymin=0, ymax=max(filtered_df['num_log_errors']), color='red', linestyles='--', label=f'pth = {pth:.3f} +/- {pth_error:.3f}')
-    if show_fit:
-        for d in d_values:
-            y_fit = []
-            p_list = []
-            for p in sorted(filtered_df['p'].unique()):
-                x = (p, d)
-                y_fit += [threshold_fit(x, *popt)]
-                p_list += [p]
-            if loglog:
-                ax.loglog(np.array(p_list)*prob_scale, y_fit, linestyle='--', color='red')
-            else:
-                # print(p_list, y_fit)
-                ax.plot(np.array(p_list)*prob_scale, y_fit, linestyle='--', color='red')
-
-    
-    ax.set_title(f'Error Type: {corr_type}', fontsize=20)
-    ax.set_xlabel('p', fontsize=14)
-    ax.set_ylabel('num_log_errors', fontsize=20)
-    ax.legend()
-
-    fig.suptitle(f'Logical Error Rates for eta = {curr_eta} and l = {curr_l}')
-    plt.tight_layout()
-    plt.show()
-
 def threshold_plot(
     full_df,
     p_th0,
     p_range,
     curr_eta,
     curr_l,
-    curr_num_shots,
     corr_type,
     CD_type,
     noise_model,
@@ -211,7 +139,10 @@ def threshold_plot(
     show_threshold=True,
     show_fit=False,
 ):
-    """Make a single threshold plot for one error type, using weighted averaging over raw chunk rows."""
+    """ 
+        Make a single threshold plot for one error type, using weighted averaging over raw chunk rows. Filters to show 
+        only one l, eta, CD_type, and noise_model threshold plot. 
+    """
 
     prob_scale = get_prob_scale(corr_type, curr_eta)
 
@@ -269,7 +200,7 @@ def threshold_plot(
         if averaging:
             # Temporary weighted combine over raw rows at equal p
             d_df_mean = shots_averaging(
-                num_shots=None,   # important for new raw-row workflow
+                num_shots=None, 
                 l=curr_l,
                 eta=curr_eta,
                 err_type=corr_type,
@@ -410,8 +341,9 @@ def threshold_plot(
     plt.show()
 
 def eta_threshold_plot(eta_df, cd_type, corr_type_list, noise_model):
-    """One subplot per corr_type, all l values overlaid, shaded error bands,
-    single shared legend, deformation in title."""
+    """
+    To compare decoding types over various eta for different l, cd_type
+    """
     
     eta_df = eta_df.copy()
 
@@ -500,7 +432,6 @@ def eta_threshold_plot(eta_df, cd_type, corr_type_list, noise_model):
             title = rf"$\mathrm{{{error_type}}}$"
 
         ax.set_title(title, fontsize=16)
-        # ax.set_title(f"{error_type}", fontsize=16)
         ax.set_xlabel("Noise Bias ($\\eta$)", fontsize=12)
         ax.grid(True)
 
@@ -975,7 +906,6 @@ def eta_threshold_plot_compare_deformations_and_decoder_2x2(
 
     plt.show()
 
-# plotter for plasma colormap
 def eta_threshold_plot_compare_deformations_and_decoder(
     eta_df,
     cd_type_list,
@@ -1547,38 +1477,16 @@ def eta_delta_threshold_gap_grid_compare_deformations_and_decoder(
 
     plt.show()
 
+######################
+#
+# Threshold fitting 
+#
+######################
+
 def threshold_fit(x, pth, nu, a,b,c):
     p,d = x
     X = (d**(1/nu))*(p-pth)
     return a + b*X + c*X**2
-
-def get_threshold_old(full_df, pth0, p_range, l, eta, error_type, num_shots, CD_type):
-    """ returns the threshold and confidence given a df 
-        in: df - the dataframe containing all data, filtered for one error_type, l eta, and probability range
-        out: p_thr - a float, the probability where intersection of different lattice distances occurred
-    """
-    print(f"Getting threshold for l = {l}, eta = {eta}, error type = {error_type}, num_shots = {num_shots}, CD = {CD_type}")
-    df = full_df[(full_df['p'] < pth0 + p_range) & ( full_df['p'] > pth0 - p_range) & (full_df['l'] == l) & (full_df['eta'] == eta) & (full_df['error_type'] == error_type) & (full_df['num_shots'] == num_shots) & (full_df['CD_type'] == CD_type)]
-    # print(df.head)
-    # df = full_df
-    if df.empty:
-        return 0, 0
-
-    # get the p_list and d_list from the dataframe
-    p_list = df['p'].to_numpy().flatten()
-    d_list = df['d'].to_numpy().flatten()
-    error_list = df['num_log_errors'].to_numpy().flatten()
-
-    # run the fitting function
-    # popt, pcov = curve_fit(threshold_fit, (p_list, d_list), error_list, p0=[pth0, 0.5, 1, 1, 1])
-    popt, pcov = curve_fit(threshold_fit, (p_list, d_list), error_list, p0=[pth0, 0.5, 0,0,0])
-    
-    # pth = popt[0] # the threshold probability
-    # pth_error = np.sqrt(np.trace(pcov))
-    # overfitting = np.linalg.cond(pcov)
-    # print(f"Overfitting condition number: {overfitting}")
-    # print(f"diag of covariance matrix: {np.diag(pcov)}")
-    return popt, pcov
 
 def get_threshold(
     full_df,
@@ -1665,58 +1573,20 @@ def get_threshold(
         error_list,
         p0=[pth0, 0.5, 0, 0, 0],
     )
-    # print("popt =", popt)
-    # print("pcov =", pcov)
-
 
     return popt, pcov
 
 def get_prob_scale(corr_type, eta):
-    """ extract the amount to be scaled by given a noise bias and the type of error
+    """ extract the amount to be scaled by given a noise bias and the type of error when plotting
     """
     prob_scale = {'X': 0.5/(1+eta), 'Z': (1+2*eta)/(2*(1+eta)), 'CORR_XZ': 1, 'CORR_ZX':1, 'TOTAL':1, 'TOTAL_MEM':1, 'X_MEM':  1, 'Z_MEM': 1, 'TOTAL_MEM_PY':1, 'X_MEM_PY':1, 'Z_MEM_PY':1,'TOTAL_MEM_CORR':1, 'X_MEM_CORR':1, 'Z_MEM_CORR':1} # TOTAL_MEM 4/3 factor of total mem is due to code_cap pauli channel scalling factor in stim, remove this?
     return prob_scale[corr_type]
 
-def get_thresholds_from_data_exactish(p_th_init_dict, p_range, output_file):
-    """
-    Given a dictionary of thresholds, get the thresholds from the data files and add them to the dictionary
-    in: num_shots - the number of shots to sample
-        p_th_init_dict - a dictionary of initial guesses for the threshold, only the entries you want to make exactish, with keys (l, eta, corr_type)
-    out: threshold_d - the updated dictionary of thresholds
-    """
-    all_thresholds_df = pd.read_csv('/Users/ariannameinking/Documents/Brown_Research/correlated_error_biased_noise/threshold_exactish_per_eta.csv')
-    # print("thresholds_df 1", all_thresholds_df)
-
-
-    for key in p_th_init_dict.keys():
-        # print("key", key)
-        l, eta, corr_type, CD_type, noise_model = key
-        print("l,eta,corr_type, CD_type, noise_model", l,eta, corr_type, CD_type, noise_model)
-
-        df = pd.read_csv(output_file)
-        # threshold_d = {}
-
-        p_th_init = p_th_init_dict[key]
-        
-        pop,pcov = get_threshold(df, p_th_init,p_range, l, eta, corr_type, CD_type)
-        if type(pop) == int:
-            print(f"Threshold fit failed for l={l}, eta={eta}, corr_type={corr_type}, CD_type={CD_type}, noise_model={noise_model}. Skipping.")
-            continue
-        print(p_th_init, pop)
-        threshold = pop[0]
-        std_error = np.sqrt(np.diag(pcov))[0] # should it be np.sqrt(np.trace(pcov)) instead to get the overall error?
-        # threshold_d[key] = threshold
-        all_thresholds_df = pd.concat([all_thresholds_df,pd.DataFrame({'l':l,'eta':eta, 'error_type':corr_type, 'CD_type':CD_type, 'noise_model':noise_model, 'pth':threshold, 'stderr':std_error}, index=[0])], ignore_index=True)
-        # print("thresholds_df 2", all_thresholds_df)
-
-    all_thresholds_df.to_csv('/Users/ariannameinking/Documents/Brown_Research/correlated_error_biased_noise/threshold_exactish_per_eta.csv', index=False)
-
-
-def get_thresholds_from_data_exactish_chat(
+def get_thresholds_full_dict(
     p_th_init_dict,
     p_range,
     output_file,
-    threshold_csv='/Users/ariannameinking/Documents/Brown_Research/correlated_error_biased_noise/threshold_exactish_per_eta.csv',
+    threshold_csv,
     save_every_iteration=False,
 ):
     """
@@ -1870,7 +1740,6 @@ def get_thresholds_from_data_exactish_chat(
 
     all_thresholds_df.to_csv(threshold_csv, index=False)
     return all_thresholds_df
-
 
 
 ###############################
