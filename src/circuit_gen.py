@@ -214,7 +214,7 @@ class CDCompassCodeCircuit:
             
             # apply a CX to each qubit in the stabilizer in the correct order
             for q,stab in q_x_list:
-                ctrl = anc
+                ctrl = stab
                 target = q + num_stabs
 
                 gate = "CX" if CD_type == "SC" else ("CZ" if CD_data[q] == 2 else "CX")
