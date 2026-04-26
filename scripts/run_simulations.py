@@ -1,3 +1,11 @@
+"""
+The functions used to get data from compute cluster. ChatGPT helped write many of the functions.
+
+Author: Arianna Meinking
+Date: April 25, 2026
+"""
+
+
 import numpy as np
 import pandas as pd
 import os
@@ -5,6 +13,7 @@ from datetime import datetime
 import glob
 import itertools
 import json
+from decoder import CorrelatedDecoder
 
 
 
@@ -15,7 +24,10 @@ import json
 ############################################
 
 def shots_averaging(num_shots, l, eta, err_type, in_df, CD_type, file, d=None, noise_model=None, min_total_shots=300):
-    """Weighted average of chunked data."""
+    """
+        Weighted average of chunked data LERS for benchmarked data extraction
+        TODO: change the num_shots to ler
+    """
     if in_df is None:
         in_data = pd.read_csv(file)
         data = in_data[
@@ -289,15 +301,7 @@ def write_data(
     overwrite : bool
         If True, delete an existing file with the same ID before starting.
     """
-    # if circuit_data:
-    #     os.makedirs("circuit_data", exist_ok=True)
-    #     if pymatch_corr:
-    #         data_file = f"circuit_data/py_corr_{ID}.csv"
-    #     else:
-    #         data_file = f"circuit_data/circuit_level_{ID}.csv"
-    # else:
-    #     os.makedirs("corr_err_data", exist_ok=True)
-    #     data_file = f"corr_err_data/code_cap_{ID}.csv"
+
 
     if circuit_data:
         os.makedirs("circuit_data", exist_ok=True)
@@ -341,137 +345,6 @@ def write_data(
 
     return data
 
-def concat_csv(folder_path, circuit_data):
-    """Combines all CSV files is in folder 'folder_path' and writes them to one common 
-        'output_file'. The CSV files in folder_path are deleted.
-        in: folder_path - the folder that stores all the csv files to be combined
-            output_file - the file that the CSV files will be combined into
-        out: no output. The folder_path files are deleted and the output_file has the files in folder_path added to it
-    """
-    data_files = glob.glob(os.path.join(folder_path, '*.csv'))
-    df_list_XZ = []
-    df_list_ZX = []
-    df_list_CL = []
-    
-    for file in data_files:
-        df = pd.read_csv(file)
-        if not circuit_data: # the error types are X, Z, CORR_XZ, CORR_ZX, TOTAL, want to classify based on CORR_XZ and CORR_ZX
-            if 'CORR_XZ' in df['error_type'].values:
-                df_list_XZ.append(df)
-            elif 'CORR_ZX' in df['error_type'].values:
-                df_list_ZX.append(df)
-        else:
-            df_list_CL.append(df) # the error types are X_Mem and Z_Mem
-    
-    if circuit_data:
-        new_data_CL = pd.concat(df_list_CL, ignore_index=True)
-    else:
-        new_data_XZ = pd.concat(df_list_XZ, ignore_index=True)
-        new_data_ZX = pd.concat(df_list_ZX, ignore_index=True)
-    
-    output_file_XZ = '/Users/ariannameinking/Documents/Brown_Research/correlated_error_biased_noise/xz_corr_err_data.csv'
-    output_file_ZX = '/Users/ariannameinking/Documents/Brown_Research/correlated_error_biased_noise/zx_corr_err_data.csv'
-    output_file_CL = '/Users/ariannameinking/Documents/Brown_Research/correlated_error_biased_noise/circuit_data.csv'
-    
-    all_data_XZ = pd.DataFrame()
-    all_data_ZX = pd.DataFrame()
-    all_data_CL = pd.DataFrame()
-
-    xz_exists = os.path.exists(output_file_XZ)
-    zx_exists = os.path.exists(output_file_ZX)
-    cl_exists = os.path.exists(output_file_CL)
-
-    # Check if the output file already exists
-    if not circuit_data:
-        if xz_exists:
-            # If it exists, load the existing data
-            existing_data = pd.read_csv(output_file_XZ)
-            # Append the new data to the existing data
-            all_data_XZ = pd.concat([existing_data, new_data_XZ], ignore_index=True)
-        elif not xz_exists:
-            # If the file doesn't exist, the new data is the combined data
-            all_data_XZ = new_data_XZ
-
-        if zx_exists:
-            # If it exists, load the existing data
-            existing_data = pd.read_csv(output_file_ZX)
-            # Append the new data to the existing data
-            all_data_ZX = pd.concat([existing_data, new_data_ZX], ignore_index=True)
-        elif not zx_exists:
-            # If the file doesn't exist, the new data is the combined data
-            all_data_ZX = new_data_ZX
-        all_data_XZ.to_csv(output_file_XZ, index=False)
-        all_data_ZX.to_csv(output_file_ZX, index=False)
-
-    else:
-        if cl_exists:
-            # If it exists, load the existing data
-            existing_data = pd.read_csv(output_file_CL)
-            # Append the new data to the existing data
-            all_data_CL = pd.concat([existing_data, new_data_CL], ignore_index=True)
-        else:
-            # If the file doesn't exist, the new data is the combined data
-            all_data_CL = output_file_CL
-        
-        all_data_CL.to_csv(output_file_CL, index=False)
-
-    
-    for file in data_files:
-        os.remove(file)
-
-def load_and_concat_csvs(folder, pattern="*.csv"):
-    files = glob.glob(f"{folder}/{pattern}")
-    
-    if len(files) == 0:
-        raise ValueError(f"No CSV files found in {folder}")
-    
-    df_list = []
-    for f in files:
-        try:
-            df = pd.read_csv(f)
-            df_list.append(df)
-        except Exception as e:
-            print(f"Skipping {f}: {e}")
-
-    full_df = pd.concat(df_list, ignore_index=True)
-    return full_df
-
-def combine_chunked_data(df):
-    df = df.copy()
-
-    # Convert rate → total errors (temporarily)
-    df["weighted_errors"] = df["num_log_errors"] * df["num_shots"]
-
-    # Define grouping columns depending on data type
-    group_cols = ["d", "p", "l", "eta", "error_type"]
-
-    if "noise_model" in df.columns:
-        group_cols += ["noise_model", "CD_type"]
-
-    # Aggregate
-    combined = (
-        df.groupby(group_cols, as_index=False)
-          .agg({
-              "num_shots": "sum",
-              "weighted_errors": "sum"
-          })
-    )
-
-    # Convert back to rate
-    combined["num_log_errors"] = (
-        combined["weighted_errors"] / combined["num_shots"]
-    )
-
-    combined = combined.drop(columns="weighted_errors")
-
-    return combined
-
-def load_and_combine(folder, pattern="*.csv"):
-    df = load_and_concat_csvs(folder, pattern)
-    combined_df = combine_chunked_data(df)
-    return combined_df
-
-# use this now to merge csvs
 def append_task_csvs_into_master(
     folder="circuit_data",
     master_file="circuit_data.csv",
@@ -619,7 +492,7 @@ def _get_completed_shots_for_point(
     # completed_p = max(df["p"].unique()) if not df.empty else None
     return completed_shots#, completed_p
 
-def get_data_DCC_chat(
+def get_data_DCC(
     circuit_data,
     corr_decoding,
     noise_model,
@@ -792,136 +665,6 @@ def get_data_DCC_chat(
             fully_biased=fully_biased,
         )
 
-def get_data_DCC(
-        circuit_data, 
-        corr_decoding, 
-        noise_model, 
-        d_list, 
-        l_list, 
-        eta_list, 
-        cd_list, 
-        corr_list, 
-        total_num_shots, 
-        p_list=None, 
-        p_th_init_d=None, 
-        p_range = 0.001,
-        pymatch_corr=False,
-        chunk_size=5000,
-        overwrite=False,
-        resume=True,
-    ):
-    """ Function to get the data from the DCC using parallel SLURM arrays. Each array task will get data for a specific (l, eta, corr_type) or (l, eta, cd_type) combo.
-        The total number of shots will be split evenly across the array tasks so that the total number of shots is reached upon averaging. 
-        in: circuit_data - boolean, whether to get data from circuit or vector code cap
-            corr_decoding - boolean, whether to get data from correlated decoding or not
-            noise_model - string, the noise model to use for circuit data, either "code_cap", "phenom", or "circuit_level"
-            d_list - list of distances to run
-            l_list - list of elongations to run
-            eta_list - list of noise biases to run
-            cd_list - list of clifford deformations to run, either "SC", "XZZXonSqu", or "ZXXZonSqu". Not to be used if corr_decoding is True and circuit_data is False.
-            corr_list - list of correlation types to run, either "CORR_XZ" or "CORR_ZX". Only to be used if corr_decoding is True and circuit_data is False.
-            total_num_shots - int, the total number of shots after averaging. Each SLURM array task will run total_num_shots/reps shots.
-            p_list - list of physical error rates to scan over. If None, will be set based on p_th_init_d
-            p_th_init_d - dictionary with keys (l, eta, corr_type) or (l, eta, cd_type) and values the initial guess for the threshold. If None, will use a default value based on eta
-            pymatch_corr - boolean, whether to use pymatching correlated decoder for circuit data
-        out: no output, but will write data to a CSV file for each SLURM array task. Run concat_csv after all tasks are complete to combine the CSV files into output_file.
-    """
-
-
-    task_id = int(os.environ['SLURM_ARRAY_TASK_ID']) # will iter over the total slurm array size and points to where you are 
-    slurm_array_size = int(os.environ['SLURM_ARRAY_TASK_MAX']) # the size of the slurm array, used to determine how many tasks to run, currently 1000
-
-    print(f"Task ID: {task_id}")
-    print(f"SLURM Array Size: {slurm_array_size}")
-
-
-    if circuit_data and not (corr_decoding or pymatch_corr): # change this to get different data for circuit level plot
-        l_eta_cd_type_arr = list(itertools.product(l_list,eta_list,cd_list))
-        reps = slurm_array_size//len(l_eta_cd_type_arr) # how many times to run file, num_shots each time
-        ind = task_id%len(l_eta_cd_type_arr) # get the index of the task_id in the l_eta__corr_type_arr
-        l, eta, cd_type = l_eta_cd_type_arr[ind] # get the l and eta from the task_id
-        num_shots = int(total_num_shots//reps) # number of shots to sample
-        print("l,eta,cd_type", l,eta, cd_type)
-        corr_type = "None"
-        if p_th_init_d is not None:
-            p_th_init = p_th_init_d[(l, eta, "TOTAL_MEM", cd_type, noise_model)]
-            p_list = np.linspace(max(p_th_init - p_range, 0.0), min(p_th_init + p_range, 1.0), 40)
-        
-        write_data(total_num_shots=num_shots, 
-                   d_list=d_list, 
-                   l=l, 
-                   p_list=p_list, 
-                   eta=eta, 
-                   ID=task_id, 
-                   corr_type=corr_type, 
-                   circuit_data=circuit_data, 
-                   noise_model=noise_model, 
-                   cd_type=cd_type, 
-                   corr_decoding=corr_decoding, 
-                   pymatch_corr=pymatch_corr,
-                   chunk_size=chunk_size,
-                   overwrite=overwrite,
-                   resume=resume)
-    if circuit_data and (pymatch_corr or corr_decoding):
-        l_eta_cd_type_arr = list(itertools.product(l_list,eta_list,cd_list))
-        reps = slurm_array_size//len(l_eta_cd_type_arr) # how many times to run file, num_shots each time
-        ind = task_id%len(l_eta_cd_type_arr) # get the index of the task_id in the l_eta__corr_type_arr
-        l, eta, cd_type = l_eta_cd_type_arr[ind] # get the l and eta from the task_id, pymatching corr should be doing an erasure channel this whole time, see what happens
-        num_shots = int(total_num_shots//reps) # number of shots to sample
-        print("l,eta,cd_type", l,eta, cd_type)
-        corr_type = "None"
-        if p_th_init_d is not None:
-            p_th_init = p_th_init_d[(l, eta, "TOTAL_MEM_PY", cd_type,noise_model)] # add the mem type somehow
-            p_list = np.linspace(p_th_init - p_range, p_th_init + p_range, 18)
-        write_data(total_num_shots=num_shots, 
-                   d_list=d_list, 
-                   l=l, 
-                   p_list=p_list, 
-                   eta=eta, 
-                   ID=task_id, 
-                   corr_type=corr_type, 
-                   circuit_data=circuit_data, 
-                   noise_model=noise_model, 
-                   cd_type=cd_type, 
-                   corr_decoding=corr_decoding, 
-                   pymatch_corr=pymatch_corr,
-                   chunk_size=chunk_size,
-                   overwrite=overwrite,
-                   resume=resume)
-
-    if corr_decoding and not circuit_data: # change this to get different data for eta plot
-        l_eta_corr_type_arr = list(itertools.product(l_list, eta_list, corr_list)) # list of tuples (l, eta, corr_type), currently 40
-        reps = slurm_array_size//len(l_eta_corr_type_arr) # how many times to run file, num_shots each time
-        ind = task_id%len(l_eta_corr_type_arr) # get the index of the task_id in the l_eta__corr_type_arr
-        l, eta, corr_type = l_eta_corr_type_arr[ind] # get the l and eta from the task_id
-        if p_th_init_d is not None:
-            p_th_init = p_th_init_d[(l, eta, corr_type)]
-            p_list = np.linspace(p_th_init - 0.03, p_th_init + 0.03, 40)
-        num_shots = int(total_num_shots//reps) # number of shots to sample
-        cd_type = "SC"
-        noise_model = "code_cap"
-        print("l,eta,corr_type", l,eta, corr_type)
-        write_data(total_num_shots=num_shots, 
-                   d_list=d_list, 
-                   l=l, 
-                   p_list=p_list, 
-                   eta=eta, 
-                   ID=task_id, 
-                   corr_type=corr_type, 
-                   circuit_data=circuit_data, 
-                   noise_model=noise_model, 
-                   cd_type=cd_type, 
-                   corr_decoding=corr_decoding, 
-                   pymatch_corr=pymatch_corr,
-                   chunk_size=chunk_size,
-                   overwrite=overwrite,
-                   resume=resume)
-
-    print("reps", reps)
-    print("ind", ind)
-    print("num_shots", num_shots)
-
-
 def load_thresholds(filename):
     with open(filename, 'r') as f:
         raw_data = json.load(f)
@@ -963,7 +706,7 @@ if __name__ == "__main__":
     # p_range=0.00125
     # p_list = np.logspace(-2.5,-1.5,n_p)
 
-    # get_data_DCC_chat(circuit_data=circuit_data,
+    # get_data_DCC(circuit_data=circuit_data,
     #                     corr_decoding=corr_decoding,
     #                     noise_model=noise_model,
     #                     d_list=d_list,
